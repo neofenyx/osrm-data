@@ -63,7 +63,7 @@ jobs:
             echo "region_name=${INPUT_REGION_NAME}"
             echo "region_url=${INPUT_REGION_URL}"
             echo "tag=${TAG}"
-            echo "tarball=${INPUT_REGION_NAME}.tar.zst"
+            echo "tarball=${INPUT_REGION_NAME}.tar.xz"
           } >> "$GITHUB_OUTPUT"
           echo "Region: $INPUT_REGION_NAME"
           echo "Tag:    $TAG"
@@ -130,18 +130,27 @@ jobs:
             "$OSRM_IMAGE" \
             osrm-customize "/data/${REGION_NAME}.osrm"
 
-      - name: Pack tarball (zstd)
+      - name: Pack tarball (xz -9, multi-threaded)
         env:
           REGION_NAME: ${{ steps.meta.outputs.region_name }}
           TARBALL: ${{ steps.meta.outputs.tarball }}
         working-directory: ${{ github.workspace }}/data
         # Files are owned by root (docker ran as root). sudo tar reads them.
-        # zstd compresses much better than gzip on OSRM binary data (~2x ratio)
-        # so GB-latest lands well under GitHub's 2 GB per-asset ceiling.
+        # xz -9 gives the best compression ratio we can realistically ship for
+        # MLD-prepared OSRM data. GB-latest measures ~4.5 GB uncompressed and
+        # compresses to roughly 1.7 GB with -9, landing under GitHub's 2 GB
+        # per-asset ceiling with useful headroom.
+        # We also drop two build-intermediate files (~240 MB) that osrm-routed
+        # doesn't read at runtime: .cnbg (compressed node-based graph) and
+        # .cnbg_to_ebg (mapping used only during partition).
         run: |
-          sudo rm -f "${REGION_NAME}.osm.pbf"
+          sudo rm -f \
+            "${REGION_NAME}.osm.pbf" \
+            "${REGION_NAME}.osrm.cnbg" \
+            "${REGION_NAME}.osrm.cnbg_to_ebg"
           sudo ls -lh
-          sudo tar --zstd -cf "../${TARBALL}" .
+          # -T 0 auto-selects thread count (4 on ubuntu-latest); -9 for max ratio.
+          sudo env XZ_OPT="-9 -T 0" tar -cJf "../${TARBALL}" .
           sudo chown "$(id -u):$(id -g)" "../${TARBALL}"
           ls -lh "../${TARBALL}"
 

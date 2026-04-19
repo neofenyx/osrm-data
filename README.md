@@ -8,7 +8,7 @@ Instead of every contributor running `osrm-extract` + `osrm-partition` + `osrm-c
 
 Each release contains a single tarball:
 
-- `great-britain-latest.tar.zst` — graph files for `osrm-routed --algorithm mld` covering England, Scotland, Wales. Built from the Geofabrik `great-britain-latest.osm.pbf` snapshot using the `car.lua` profile.
+- `great-britain-latest.tar.xz` — graph files for `osrm-routed --algorithm mld` covering England, Scotland, Wales. Built from the Geofabrik `great-britain-latest.osm.pbf` snapshot using the `car.lua` profile.
 
 The tarball contains the `.osrm` edge graph plus all `.osrm.*` MLD sidecar files — everything `osrm-routed` needs at runtime. The raw PBF is *not* included.
 
@@ -19,11 +19,11 @@ The tarball contains the `.osrm` edge graph plus all `.osrm.*` MLD sidecar files
 
 ## Consumer usage
 
-Point your OSRM data volume at a release asset. Requires `zstd` installed locally (pre-installed on most modern distros; on the OSRM Docker image it's `apt-get install zstd`):
+Point your OSRM data volume at a release asset. Requires `xz-utils` installed (pre-installed on most distros; on the OSRM Docker image it's `apt-get install xz-utils`):
 
 ```sh
-OSRM_PREBUILT_URL=https://github.com/neofenyx/osrm-data/releases/download/latest/great-britain-latest.tar.zst
-curl -L --fail "$OSRM_PREBUILT_URL" | tar --zstd -xf - -C /data
+OSRM_PREBUILT_URL=https://github.com/neofenyx/osrm-data/releases/download/latest/great-britain-latest.tar.xz
+curl -L --fail "$OSRM_PREBUILT_URL" | tar -xJf - -C /data
 osrm-routed --algorithm mld /data/great-britain-latest.osrm
 ```
 
