@@ -1,0 +1,190 @@
+name: Build and release OSRM data
+
+on:
+  workflow_dispatch:
+    inputs:
+      region_name:
+        description: "Region slug (used in tarball and release name)"
+        type: string
+        default: great-britain-latest
+        required: true
+      region_url:
+        description: "Geofabrik PBF download URL"
+        type: string
+        default: https://download.geofabrik.de/europe/great-britain-latest.osm.pbf
+        required: true
+      update_latest:
+        description: "Also update the moving 'latest' release tag"
+        type: boolean
+        default: true
+        required: true
+  schedule:
+    # 03:00 UTC on the 1st of every month
+    - cron: "0 3 1 * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  OSRM_IMAGE: ghcr.io/project-osrm/osrm-backend:v5.27.1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve inputs and tag
+        id: meta
+        env:
+          INPUT_REGION_NAME: ${{ inputs.region_name || 'great-britain-latest' }}
+          INPUT_REGION_URL: ${{ inputs.region_url || 'https://download.geofabrik.de/europe/great-britain-latest.osm.pbf' }}
+        run: |
+          # Whitelist the region slug: lowercase alphanumerics and hyphens only.
+          # This blocks shell metacharacters even if a maintainer triggers with a hostile value.
+          if ! printf '%s' "$INPUT_REGION_NAME" | grep -qE '^[a-z0-9-]+$'; then
+            echo "::error::region_name must match ^[a-z0-9-]+$ (got: $INPUT_REGION_NAME)"
+            exit 1
+          fi
+          # Whitelist the URL to Geofabrik's download host (the only source we support).
+          if ! printf '%s' "$INPUT_REGION_URL" | grep -qE '^https://download\.geofabrik\.de/.+\.osm\.pbf$'; then
+            echo "::error::region_url must be an https://download.geofabrik.de/... .osm.pbf URL"
+            exit 1
+          fi
+          DATE=$(date -u +%Y-%m-%d)
+          TAG="${INPUT_REGION_NAME}-${DATE}"
+          {
+            echo "region_name=${INPUT_REGION_NAME}"
+            echo "region_url=${INPUT_REGION_URL}"
+            echo "tag=${TAG}"
+            echo "tarball=${INPUT_REGION_NAME}.tar.gz"
+          } >> "$GITHUB_OUTPUT"
+          echo "Region: $INPUT_REGION_NAME"
+          echo "Tag:    $TAG"
+
+      - name: Free up runner disk
+        # Strip GHA's pre-installed toolchains we don't need; reclaims ~20 GB.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Configure 16 GB swap
+        # Insurance against OOM during osrm-extract's edge-expansion phase.
+        # Runner RAM is 16 GB; large regions can spike past that.
+        run: |
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: Pull OSRM image
+        run: docker pull "$OSRM_IMAGE"
+
+      - name: Download Geofabrik PBF
+        env:
+          REGION_NAME: ${{ steps.meta.outputs.region_name }}
+          REGION_URL: ${{ steps.meta.outputs.region_url }}
+        run: |
+          mkdir -p data
+          curl -L --fail --retry 3 --retry-delay 10 \
+            -o "data/${REGION_NAME}.osm.pbf" \
+            "$REGION_URL"
+          ls -lh data/
+
+      - name: osrm-extract
+        env:
+          REGION_NAME: ${{ steps.meta.outputs.region_name }}
+        run: |
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}/data:/data" \
+            "$OSRM_IMAGE" \
+            osrm-extract -p /opt/car.lua "/data/${REGION_NAME}.osm.pbf"
+          df -h /
+
+      - name: osrm-partition
+        env:
+          REGION_NAME: ${{ steps.meta.outputs.region_name }}
+        run: |
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}/data:/data" \
+            "$OSRM_IMAGE" \
+            osrm-partition "/data/${REGION_NAME}.osrm"
+
+      - name: osrm-customize
+        env:
+          REGION_NAME: ${{ steps.meta.outputs.region_name }}
+        run: |
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}/data:/data" \
+            "$OSRM_IMAGE" \
+            osrm-customize "/data/${REGION_NAME}.osrm"
+
+      - name: Pack tarball
+        env:
+          REGION_NAME: ${{ steps.meta.outputs.region_name }}
+          TARBALL: ${{ steps.meta.outputs.tarball }}
+        working-directory: ${{ github.workspace }}/data
+        run: |
+          # Drop the raw PBF — consumers only need the prepped graph.
+          rm -f "${REGION_NAME}.osm.pbf"
+          ls -lh
+          tar czf "../${TARBALL}" .
+          ls -lh "../${TARBALL}"
+
+      - name: Sanity-check tarball size (<2 GB GitHub asset limit)
+        env:
+          TARBALL: ${{ steps.meta.outputs.tarball }}
+        run: |
+          BYTES=$(stat -c%s "$TARBALL")
+          GB=$(awk -v b="$BYTES" 'BEGIN {printf "%.2f", b/1024/1024/1024}')
+          echo "Tarball size: ${GB} GB"
+          if [ "$BYTES" -gt 2000000000 ]; then
+            echo "::error::Tarball exceeds GitHub's 2 GB per-asset limit; consider zstd or splitting"
+            exit 1
+          fi
+
+      - name: Create dated release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGION_NAME: ${{ steps.meta.outputs.region_name }}
+          REGION_URL: ${{ steps.meta.outputs.region_url }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          TARBALL: ${{ steps.meta.outputs.tarball }}
+        run: |
+          NOTES_FILE=$(mktemp)
+          BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          {
+            echo "Pre-baked OSRM graph for \`${REGION_NAME}\`."
+            echo
+            echo "- Source: ${REGION_URL}"
+            echo "- Built: ${BUILD_TIME}"
+            echo "- OSRM: \`${OSRM_IMAGE}\`"
+            echo "- Profile: \`car.lua\` (MLD)"
+            echo
+            echo "Map data © OpenStreetMap contributors, licensed under [ODbL](https://opendatacommons.org/licenses/odbl/)."
+          } > "$NOTES_FILE"
+          gh release create "$TAG" --title "$TAG" --notes-file "$NOTES_FILE" "$TARBALL"
+
+      - name: Refresh moving 'latest' release
+        if: ${{ inputs.update_latest != false }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          TARBALL: ${{ steps.meta.outputs.tarball }}
+        run: |
+          # Delete any previous 'latest' release + tag, then recreate pointing at this build's tarball.
+          gh release delete latest --yes --cleanup-tag || true
+          NOTES_FILE=$(mktemp)
+          {
+            echo "Tracks the most recent dated build. Current: **${TAG}**."
+            echo
+            echo "Pin to a specific date if you need reproducibility."
+          } > "$NOTES_FILE"
+          gh release create latest --title "latest (moving)" --notes-file "$NOTES_FILE" "$TARBALL"

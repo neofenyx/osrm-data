@@ -1,0 +1,5 @@
+data/
+*.osm.pbf
+*.osrm
+*.osrm.*
+*.tar.gz
