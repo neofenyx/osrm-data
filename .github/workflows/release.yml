@@ -63,7 +63,7 @@ jobs:
             echo "region_name=${INPUT_REGION_NAME}"
             echo "region_url=${INPUT_REGION_URL}"
             echo "tag=${TAG}"
-            echo "tarball=${INPUT_REGION_NAME}.tar.gz"
+            echo "tarball=${INPUT_REGION_NAME}.tar.zst"
           } >> "$GITHUB_OUTPUT"
           echo "Region: $INPUT_REGION_NAME"
           echo "Tag:    $TAG"
@@ -130,16 +130,19 @@ jobs:
             "$OSRM_IMAGE" \
             osrm-customize "/data/${REGION_NAME}.osrm"
 
-      - name: Pack tarball
+      - name: Pack tarball (zstd)
         env:
           REGION_NAME: ${{ steps.meta.outputs.region_name }}
           TARBALL: ${{ steps.meta.outputs.tarball }}
         working-directory: ${{ github.workspace }}/data
+        # Files are owned by root (docker ran as root). sudo tar reads them.
+        # zstd compresses much better than gzip on OSRM binary data (~2x ratio)
+        # so GB-latest lands well under GitHub's 2 GB per-asset ceiling.
         run: |
-          # Drop the raw PBF — consumers only need the prepped graph.
-          rm -f "${REGION_NAME}.osm.pbf"
-          ls -lh
-          tar czf "../${TARBALL}" .
+          sudo rm -f "${REGION_NAME}.osm.pbf"
+          sudo ls -lh
+          sudo tar --zstd -cf "../${TARBALL}" .
+          sudo chown "$(id -u):$(id -g)" "../${TARBALL}"
           ls -lh "../${TARBALL}"
 
       - name: Sanity-check tarball size (<2 GB GitHub asset limit)
