@@ -74,14 +74,18 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
 
-      - name: Configure 16 GB swap
+      - name: Configure 16 GB swap on /mnt
         # Insurance against OOM during osrm-extract's edge-expansion phase.
-        # Runner RAM is 16 GB; large regions can spike past that.
+        # Runner RAM is 16 GB; large regions can spike past that. /mnt is the
+        # runner's large scratch disk (~84 GB free) and avoids clashing with
+        # any pre-existing /swapfile the image ships with.
         run: |
-          sudo fallocate -l 16G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile
+          sudo fallocate -l 16G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
           free -h
 
       - name: Pull OSRM image
